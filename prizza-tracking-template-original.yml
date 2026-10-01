@@ -1,0 +1,580 @@
+AWSTemplateFormatVersion: 2010-09-09
+# Testing lochness ingestion: test 7
+Description: Template creates resources for the lab-1-apigw-eventbridge self paced lab.
+
+Parameters:
+  InstanceType:
+    Default: t3.micro
+    Description: EC2 instance type, e.g. t3.micro, etc.
+    Type: String
+  LinuxAmiId:
+    Description: The name of the Linux AMI to use
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  Sandbox:
+    Type: String
+    Default: "FALSE"
+    AllowedValues:
+      - "TRUE"
+      - "FALSE"
+    Description: Enable Sandbox mode with protected permission scope tags
+
+
+Resources:
+
+  ###########
+  # Create VPC
+  ###########
+
+  LabVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      CidrBlock: 10.10.0.0/16
+      Tags:
+        - Key: Name
+          Value: lab_vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: lab_igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref LabVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref LabVPC
+      MapPublicIpOnLaunch: true
+      CidrBlock: 10.10.1.0/24
+      AvailabilityZone: !Select
+        - '0'
+        - !GetAZs ''
+      Tags:
+        - Key: Name
+          Value: public_1
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref LabVPC
+      Tags:
+        - Key: Name
+          Value: lab_public_rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  #########
+  # Security groups
+  #########
+
+  WebserverSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupName: lab_webserver_sg
+      GroupDescription: Enable HTTP access for lab web server
+      VpcId: !Ref LabVPC
+      Tags:
+        - Key: Name
+          Value: lab_webserver_sg
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTP access for lab web application
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0
+          Description: HTTP outbound for package updates
+        - IpProtocol: tcp
+          FromPort: '443'
+          ToPort: '443'
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS outbound for package updates
+        - IpProtocol: tcp
+          FromPort: '53'
+          ToPort: '53'
+          CidrIp: 0.0.0.0/0
+          Description: Allow DNS TCP
+        - IpProtocol: udp
+          FromPort: '53'
+          ToPort: '53'
+          CidrIp: 0.0.0.0/0
+          Description: Allow DNS UDP
+
+  ###########
+  # Launch EC2
+  ###########
+
+  WebInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LinuxAmiId
+      IamInstanceProfile: !Ref SSMInstanceProfile
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          GroupSet:
+            - Ref: "WebserverSecurityGroup"
+          SubnetId:
+            Ref: "PublicSubnet1"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          dnf -y update
+          cd /home/ec2-user/
+          wget https://${AWS::Region}-tcprod.s3.${AWS::Region}.amazonaws.com/courses/SPL-TF-200-SVGWEB/v1.0.14.prod-c28af01a/scripts/website.zip
+          unzip website.zip
+          dnf install nginx -y
+          sudo chmod -R 777 /etc/nginx/conf.d
+          cat <<EOT >> /etc/nginx/conf.d/lab-1-apigw-eventbridge.conf
+          server {
+            listen 80;
+            listen [::]:80;
+            server_name _;
+            location / {
+              root /home/ec2-user/website;
+            }
+            include /etc/nginx/default.d/*.conf;
+            error_page 404 /404.html;
+            location = /40x.html{}
+            error_page 500 502 503 504 /50x.html;
+            location = /50x.html{}
+          }
+          EOT
+          chmod 755 /home/ec2-user
+          systemctl enable nginx
+          systemctl start nginx
+      Tags:
+        - Key: Name
+          Value: web-server
+
+  ###########
+  # Security Group Egress Restriction
+  ###########
+
+  SecurityGroupUpdaterRestrictEgress:
+    Type: AWS::CloudFormation::Stack
+    DependsOn:
+      - WebInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      TemplateURL: !Sub https://${AWS::Region}-tcprod.s3.${AWS::Region}.amazonaws.com/courses/AWS-TC-LabFusion/templates/security-group-restrict-egress/yml/v2/security-group-restrict-egress.yml
+      Parameters:
+        SecurityGroupIds: !GetAtt WebserverSecurityGroup.GroupId
+        Sandbox: !Ref Sandbox
+
+  ###########
+  # IAM Roles
+  ###########
+
+  SSMInstanceRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "lab_ec2_role"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - ec2.amazonaws.com
+              - ssm.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: "A SSM role for use by EC2 Instances to be managed."
+      ManagedPolicyArns: [
+        "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+        "arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess",
+        "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
+      ]
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ec2:RunInstances"
+                Resource:
+                  - 'arn:aws:ec2:*:*:instance/*'
+                  - 'arn:aws:ec2:*:*:volume/*'
+                  - 'arn:aws:ec2:*:*:network-interface/*'
+                  - 'arn:aws:ec2:*:*:subnet/*'
+                  - 'arn:aws:ec2:*:*:security-group/*'
+                  - 'arn:aws:ec2:*:*:key-pair/*'
+                  - 'arn:aws:ec2:*:*:image/*'
+                Condition:
+                  StringNotEquals:
+                    "ec2:Region":
+                      - "us-west-2"
+                      - "us-east-1"
+                  StringLike:
+                    "ec2:InstanceType":
+                      - "*.nano"
+                      - "*.micro"
+                      - "*.small"
+                      - "t*.medium"
+              - Effect: Allow
+                Action:
+                  - "ec2:DescribeInstances"
+                  - "ec2:DescribeKeyPairs"
+                  - "ec2:DescribeImages"
+                  - "ec2:CreateTags"
+                  - "ec2:DescribeTags"
+                Resource: '*'
+              - Effect: Deny
+                Action: 'ec2:RunInstances'
+                Resource:
+                  - 'arn:aws:ec2:*:*:image/*'
+                Condition:
+                  StringNotEqualsIgnoreCaseIfExists:
+                    'ec2:Owner': amazon
+              - Effect: Deny
+                Action:
+                  - 'ec2:*Spot*'
+                  - 'ec2:*ReservedInstances*'
+                  - 'ec2:*Scheduled*'
+                  - 'ec2:*Purchase*'
+                  - 'ec2:EnableFastSnapshotRestores'
+                Resource: '*'
+              - Effect: Deny
+                Action: 'ec2:*Instance*'
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'ec2:PlacementGroupStrategy': cluster
+              - Effect: Deny
+                Action: 'ec2:*Instance*'
+                Resource: 'arn:aws:ec2:*:*:instance/*'
+                Condition:
+                  StringNotLike:
+                    'ec2:Tenancy': default
+              - Effect: Deny
+                Action:
+                  - 'ec2:RunInstances'
+                  - 'ec2:StartInstances'
+                Resource: 'arn:aws:ec2:*:*:instance/*'
+                Condition:
+                  'ForAnyValue:StringNotLike':
+                    'ec2:InstanceType':
+                      - '*.nano'
+                      - '*.micro'
+                      - '*.small'
+                      - t*.medium
+              - Effect: Deny
+                Action:
+                  - 'ec2:RunInstances'
+                  - 'ec2:CreateVolume'
+                Resource: 'arn:aws:ec2:*:*:volume/*'
+                Condition:
+                  NumericGreaterThanIfExists:
+                    'ec2:VolumeSize': '35'
+              - Effect: Deny
+                Action:
+                  - 'ec2:RunInstances'
+                  - 'ec2:CreateVolume'
+                Resource: 'arn:aws:ec2:*:*:volume/*'
+                Condition:
+                  StringNotLikeIfExists:
+                    'ec2:VolumeType':
+                      - gp2
+                      - standard
+              - Effect: Deny
+                Action:
+                  - 'autoscaling:CreateLaunchConfiguration'
+                Resource: '*'
+                Condition:
+                  'ForAnyValue:StringNotLike':
+                    'autoscaling:InstanceType':
+                      - '*.nano'
+                      - '*.micro'
+                      - '*.small'
+                      - t*.medium
+              - Effect: Deny
+                Resource: '*'
+                Action:
+                  - 'autoscaling:CreateAutoScalingGroup'
+                  - 'autoscaling:UpdateAutoScalingGroup'
+                Condition:
+                  NumericGreaterThan:
+                    'autoscaling:MaxSize': '1'
+          PolicyName: 'LabEC2RunInstances'
+
+  SSMInstanceProfile:
+    Type: "AWS::IAM::InstanceProfile"
+    Properties:
+      InstanceProfileName: "lab_ec2_profile"
+      Roles:
+        - !Ref SSMInstanceRole
+
+  EventBridgeRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "lab_events_role"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - events.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: "A role for used Amazon Event Bridge"
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'events:InvokeApiDestination'
+                Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:destination/lab_*'
+          PolicyName: 'LabEvents'
+
+  APIGatewayRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "lab_apigw_role"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - apigateway.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: "A role for used Amazon API Gateway"
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'events:PutEvents'
+                Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/lab_event_bus'
+          PolicyName: 'LabAPIGW'
+
+  LambdaRoleMakePizza:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "lab_lambda_make_pizza"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: "Role used by the AWS Lambda service"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'events:PutEvents'
+                Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/lab_event_bus'
+              - Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+          PolicyName: 'LabLambdaGW'
+
+  LambdaRoleCookPizza:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "lab_lambda_cook_pizza"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: "Role used by the AWS Lambda service"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'events:PutEvents'
+                Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/lab_event_bus'
+              - Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+          PolicyName: 'LabLambdaGW'
+
+  LambdaRoleDeliverPizza:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "lab_lambda_deliver_pizza"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: "Role used by the AWS Lambda service"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'events:PutEvents'
+                Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/lab_event_bus'
+              - Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+          PolicyName: 'LabLambdaGW'
+
+  LambdaRoleWebSocketConnection:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "lab_lambda_websocket_connection"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: "Role used by the AWS Lambda service"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/websocket_connections'
+              - Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+          PolicyName: 'LabLambdaGW'
+
+  LambdaRoleReceiveEvents:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: "lab_lambda_receive_events"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: "Role used by the AWS Lambda service"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:GetItem'
+                Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/websocket_connections'
+              - Effect: Allow
+                Action:
+                  - 'execute-api:ManageConnections'
+                  - 'execute-api:Invoke'
+                Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/POST/@connections/*'
+              - Effect: Allow
+                Action:
+                  - 'kms:Decrypt'
+                Resource: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+          PolicyName: 'LabLambdaGW'
+
+  ############
+  # DynamoDB Tables
+  ###########
+
+  WebsocketConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: websocket_connections
+      AttributeDefinitions:
+        -
+          AttributeName: "order_id"
+          AttributeType: "S"
+      KeySchema:
+        -
+          AttributeName: "order_id"
+          KeyType: "HASH"
+      ProvisionedThroughput:
+        ReadCapacityUnits: "5"
+        WriteCapacityUnits: "5"
+
+Outputs:
+  WebServerIP:
+    Description : "Web server public IP address"
+    Value: !GetAtt WebInstance.PublicIp
+    Export:
+      Name: WebServerPublicIP
+
+  APIExecutionRoleARN:
+    Description: API Gateway execuction role arn
+    Value: !GetAtt APIGatewayRole.Arn
+    Export:
+      Name: APIExecutionRoleARN
+
+  AWSRegion:
+    Description: The AWS Region that the lab is running in
+    Value: !Ref "AWS::Region"
+    Export:
+      Name: AWSRegion

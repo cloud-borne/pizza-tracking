@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Pizza Tracking webserver stack.
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  LinuxAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+  HttpApiInvokeUrl:
+    Type: String
+    Description: Invoke URL for the deployed lab_http_api.
+  WebSocketApiUrl:
+    Type: String
+    Description: WebSocket URL for the deployed lab_websocket_api.
+  WebsiteArtifactBucket:
+    Type: String
+    Description: S3 bucket containing the customized website archive.
+  WebsiteArtifactKey:
+    Type: String
+    Default: pizza-tracking/website-deploy.zip
+    Description: S3 object key for the customized website archive.
+
+Resources:
+  LabVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.10.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: lab_vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: lab_igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref LabVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref LabVPC
+      CidrBlock: 10.10.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select ['0', !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: public_1
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref LabVPC
+      Tags:
+        - Key: Name
+          Value: lab_public_rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  WebserverSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: lab_webserver_sg
+      GroupDescription: Enable HTTP access for lab web server
+      VpcId: !Ref LabVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTP access for lab web application
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  SSMInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lab_ec2_role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: [ec2.amazonaws.com, ssm.amazonaws.com]
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+
+  SSMInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: lab_ec2_profile
+      Roles: [!Ref SSMInstanceRole]
+
+  WebInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref LinuxAmiId
+      IamInstanceProfile: !Ref SSMInstanceProfile
+      MetadataOptions:
+        HttpTokens: required
+        HttpPutResponseHopLimit: 1
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet: [!Ref WebserverSecurityGroup]
+          SubnetId: !Ref PublicSubnet1
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          exec > >(tee /var/log/pizza-tracking-user-data.log | logger -t pizza-tracking-user-data -s 2>/dev/console) 2>&1
+          dnf -y update
+          dnf install -y nginx unzip
+          WEB_DIR="/usr/share/nginx/html"
+          aws s3 cp s3://${WebsiteArtifactBucket}/${WebsiteArtifactKey} /tmp/website.zip
+          unzip -o /tmp/website.zip -d $WEB_DIR
+          cat <<EOT > $WEB_DIR/runtime-config.js
+          window.PIZZA_CONFIG = {
+            apiUrl: "${HttpApiInvokeUrl}",
+            wsUrl: "${WebSocketApiUrl}"
+          };
+          EOT
+          chown -R nginx:nginx $WEB_DIR
+          systemctl enable --now nginx
+      Tags:
+        - Key: Name
+          Value: web-server
+
+Outputs:
+  WebServerIP:
+    Description: Web server public IP address
+    Value: !GetAtt WebInstance.PublicIp
+    Export:
+      Name: WebServerPublicIP
+  AWSRegion:
+    Description: AWS Region used by the webserver stack
+    Value: !Ref AWS::Region

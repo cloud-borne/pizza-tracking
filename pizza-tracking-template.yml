@@ -1,0 +1,474 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Pizza Tracking application foundation stack.
+
+Parameters:
+  EventBusName:
+    Type: String
+    Default: lab_event_bus
+    Description: Name of the custom EventBridge bus created by this stack.
+  TableName:
+    Type: String
+    Default: websocket_connections
+    Description: DynamoDB table used to map order IDs to WebSocket connections.
+  LambdaArtifactsBucket:
+    Type: String
+    Description: S3 bucket containing the Node.js Lambda deployment ZIP.
+  LambdaArtifactsKey:
+    Type: String
+    Default: pizza-tracking/lambda-package.zip
+    Description: S3 object key for the Node.js Lambda deployment ZIP.
+
+Resources:
+  EventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Ref EventBusName
+
+  APIGatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lab_apigw_role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: { Service: apigateway.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LabAPIGW
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: events:PutEvents
+                Resource: !GetAtt EventBus.Arn
+
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lab_events_role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: { Service: events.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LabEvents
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: events:InvokeApiDestination
+                Resource: !Sub arn:aws:events:${AWS::Region}:${AWS::AccountId}:destination/lab_*
+
+  LambdaRoleMakePizza:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lab_lambda_make_pizza
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LabLambdaEvents
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: events:PutEvents
+                Resource: !GetAtt EventBus.Arn
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*
+
+  LambdaRoleCookPizza:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lab_lambda_cook_pizza
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LabLambdaEvents
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: events:PutEvents
+                Resource: !GetAtt EventBus.Arn
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*
+
+  LambdaRoleDeliverPizza:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lab_lambda_deliver_pizza
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LabLambdaEvents
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: events:PutEvents
+                Resource: !GetAtt EventBus.Arn
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*
+
+  LambdaRoleWebSocketConnection:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lab_lambda_websocket_connection
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LabLambdaWebSocketConnection
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:PutItem, dynamodb:UpdateItem]
+                Resource: !GetAtt WebsocketConnectionsTable.Arn
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*
+
+  LambdaRoleReceiveEvents:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: lab_lambda_receive_events
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LabLambdaReceiveEvents
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: dynamodb:GetItem
+                Resource: !GetAtt WebsocketConnectionsTable.Arn
+              - Effect: Allow
+                Action: [execute-api:ManageConnections, execute-api:Invoke]
+                Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*/*/POST/@connections/*
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/*
+
+  MakePizzaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: make_pizza
+      Runtime: nodejs20.x
+      Handler: make-pizza.handler
+      Role: !GetAtt LambdaRoleMakePizza.Arn
+      Timeout: 10
+      Code:
+        S3Bucket: !Ref LambdaArtifactsBucket
+        S3Key: !Ref LambdaArtifactsKey
+      Environment:
+        Variables:
+          EVENT_BUS: !Ref EventBus
+
+  CookPizzaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: cook_pizza
+      Runtime: nodejs20.x
+      Handler: cook-pizza.handler
+      Role: !GetAtt LambdaRoleCookPizza.Arn
+      Timeout: 10
+      Code:
+        S3Bucket: !Ref LambdaArtifactsBucket
+        S3Key: !Ref LambdaArtifactsKey
+      Environment:
+        Variables:
+          EVENT_BUS: !Ref EventBus
+
+  DeliverPizzaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: deliver_pizza
+      Runtime: nodejs20.x
+      Handler: deliver-pizza.handler
+      Role: !GetAtt LambdaRoleDeliverPizza.Arn
+      Timeout: 10
+      Code:
+        S3Bucket: !Ref LambdaArtifactsBucket
+        S3Key: !Ref LambdaArtifactsKey
+      Environment:
+        Variables:
+          EVENT_BUS: !Ref EventBus
+
+  WebSocketConnectFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: websocket_connect
+      Runtime: nodejs20.x
+      Handler: websocket_connect.handler
+      Role: !GetAtt LambdaRoleWebSocketConnection.Arn
+      Timeout: 10
+      Code:
+        S3Bucket: !Ref LambdaArtifactsBucket
+        S3Key: !Ref LambdaArtifactsKey
+      Environment:
+        Variables:
+          TABLENAME: !Ref WebsocketConnectionsTable
+
+  ReceiveEventsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: receive_events
+      Runtime: nodejs20.x
+      Handler: receive-events.handler
+      Role: !GetAtt LambdaRoleReceiveEvents.Arn
+      Timeout: 10
+      Code:
+        S3Bucket: !Ref LambdaArtifactsBucket
+        S3Key: !Ref LambdaArtifactsKey
+      Environment:
+        Variables:
+          TABLENAME: !Ref WebsocketConnectionsTable
+          APIGW_ENDPOINT: !Sub https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/production
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: lab_http_api
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: ['*']
+        AllowMethods: [POST, OPTIONS]
+        AllowHeaders: ['*']
+
+  HttpApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: $default
+      AutoDeploy: true
+
+  HttpApiIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationSubtype: EventBridge-PutEvents
+      CredentialsArn: !GetAtt APIGatewayRole.Arn
+      PayloadFormatVersion: '1.0'
+      RequestParameters:
+        EventBusName: !Ref EventBus
+        Detail: $request.body
+        DetailType: "eventtype"
+        Source: "lab_http_api"
+
+  HttpApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: POST /
+      Target: !Sub integrations/${HttpApiIntegration}
+
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: lab_websocket_api
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: $request.body.action
+
+  WebSocketApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: production
+      AutoDeploy: true
+
+  WebSocketConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationMethod: POST
+      PayloadFormatVersion: '1.0'
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WebSocketConnectFunction.Arn}/invocations
+
+  WebSocketConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $connect
+      Target: !Sub integrations/${WebSocketConnectIntegration}
+
+  WebSocketConnectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref WebSocketConnectFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*
+
+  MakePizzaRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: lab_make_pizza_rule
+      EventBusName: !Ref EventBus
+      EventPattern:
+        source: [lab_http_api]
+        detail-type: [eventtype]
+        detail:
+          item:
+            eventtype: [make_pizza]
+      Targets:
+        - Arn: !GetAtt MakePizzaFunction.Arn
+          Id: make-pizza
+
+  CookPizzaRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: lab_cook_pizza_rule
+      EventBusName: !Ref EventBus
+      EventPattern:
+        source: [make_pizza]
+        detail-type: [eventtype]
+        detail:
+          item:
+            eventtype: [cook_pizza]
+      Targets:
+        - Arn: !GetAtt CookPizzaFunction.Arn
+          Id: cook-pizza
+
+  DeliverPizzaRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: lab_deliver_pizza_rule
+      EventBusName: !Ref EventBus
+      EventPattern:
+        source: [cook_pizza]
+        detail-type: [eventtype]
+        detail:
+          item:
+            eventtype: [deliver_pizza]
+      Targets:
+        - Arn: !GetAtt DeliverPizzaFunction.Arn
+          Id: deliver-pizza
+
+  ReceiveEventsRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: lab_receive_events_rule
+      EventBusName: !Ref EventBus
+      EventPattern:
+        detail:
+          item:
+            eventtype: [make_pizza, cook_pizza, deliver_pizza, delivered]
+      Targets:
+        - Arn: !GetAtt ReceiveEventsFunction.Arn
+          Id: receive-events
+
+  MakePizzaRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MakePizzaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt MakePizzaRule.Arn
+
+  CookPizzaRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CookPizzaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CookPizzaRule.Arn
+
+  DeliverPizzaRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref DeliverPizzaFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt DeliverPizzaRule.Arn
+
+  ReceiveEventsRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ReceiveEventsFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ReceiveEventsRule.Arn
+
+  WebsocketConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref TableName
+      AttributeDefinitions:
+        - AttributeName: order_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: order_id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+
+Outputs:
+  APIExecutionRoleARN:
+    Description: API Gateway role ARN for the EventBridge PutEvents integration.
+    Value: !GetAtt APIGatewayRole.Arn
+    Export:
+      Name: APIExecutionRoleARN
+  EventBusARN:
+    Description: ARN of the EventBridge bus created by this stack.
+    Value: !GetAtt EventBus.Arn
+    Export:
+      Name: PizzaTrackingEventBusARN
+  HttpApiInvokeUrl:
+    Description: Invoke URL for the HTTP API created by this stack.
+    Value: !Sub https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com
+    Export:
+      Name: PizzaTrackingHttpApiInvokeUrl
+  WebSocketApiUrl:
+    Description: WebSocket URL for the WebSocket API created by this stack.
+    Value: !Sub wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/production
+    Export:
+      Name: PizzaTrackingWebSocketApiUrl
+  TableName:
+    Description: DynamoDB table used for WebSocket connection tracking.
+    Value: !Ref WebsocketConnectionsTable
+    Export:
+      Name: PizzaTrackingConnectionsTableName
+  AWSRegion:
+    Description: AWS Region used by the application stack.
+    Value: !Ref AWS::Region
+    Export:
+      Name: AWSRegion

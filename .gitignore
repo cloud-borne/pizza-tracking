@@ -1,0 +1,24 @@
+# Node.js dependencies and logs
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local environment and AWS credentials
+.env
+.env.*
+!.env.example
+.aws/
+
+# Generated packages and build output
+*.zip
+.aws-sam/
+coverage/
+dist/
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
