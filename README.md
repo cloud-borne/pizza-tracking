@@ -235,80 +235,10 @@ aws cloudformation describe-stacks `
   --query "Stacks[0].Outputs"
 ```
 
-WebSocketApiUrl=wss://1pxb61hg44.execute-api.us-west-1.amazonaws.com/production
-HttpApiInvokeUrl=https://e7y8hg5eib.execute-api.us-west-1.amazonaws.com
+$WebSocketApiUrl="wss://1pxb61hg44.execute-api.us-west-1.amazonaws.com/production"
+$HttpApiInvokeUrl="https://e7y8hg5eib.execute-api.us-west-1.amazonaws.com"
 
------------------------------------------------------
-
-I’ll trace the application stack’s API and event flow, then check the README for existing deployment assumptions so I can give you a CLI-only end-to-end test that works before the website is installed.
-
-Search complete: Trace app test path
-
-Searched codebase for "pizza tracking application AWS workflow CloudFormation deployment test", 2 results
-
-Searched codebase for "manual test steps Lambda handlers API Gateway HTTP WebSocket URLs EventBridge", 2 results
-
-Searched for files matching `**/pizza-tracking/**`, no matches
-
-Searched for files matching `**/README*`, 1 match
-
-Searched for files matching `**/template.*`, no matches
-
-Searched for files matching `**/cloudformation.*`, no matches
-
-Searched for regex `API Gateway|EventBridge|Lambda.*handler|WebSocket|HTTP.*URL`, 182 results
-
-Searched for regex `pizza.*tracking|pizza.*state|order.*pizza`, 54 results
-
-Read , lines 1 to 260
-
-Read 
-
-Read , lines 1 to 470
-
-Read 
-
-Searched for files matching `**/*.js`, 13 matches
-
-Searched for files matching `**/lambda-build/**`, 7 matches
-
-Searched for files matching `**/website/**`, 7 matches
-
-Searched for text `pizza-tracking-template.yml`, 6 results
-
-Yes. The website stack is separate from the application stack, so you can test the HTTP API, EventBridge rules, Lambda workflow, DynamoDB connection record, and WebSocket notifications without installing the website. The webserver stack you deleted is not needed for this test.
-
-The application flow in `pizza-tracking-template.yml` accepts the same `make_pizza` request the frontend sends. Use `pizza-tracking-app` if it is already deployed; otherwise, deploy that stack first using the application-stack instructions in `README.md`. You’ll need its `HttpApiInvokeUrl` and `WebSocketApiUrl` outputs.
-
-1. Start a WebSocket client first. Install `wscat` if needed with `npm install -g wscat`. In one PowerShell window, connect using the WebSocket URL from the stack outputs:
-
-```powershell
-$WebSocketApiUrl = "wss://1pxb61hg44.execute-api.us-west-1.amazonaws.com/production"
-$OrderId = "TEST-001"
-wscat -c "${WebSocketApiUrl}?order_id=${OrderId}"
-```
-
-Wait for `Connected`. Keep this window open.
-
-2. In a second PowerShell window, POST an order to the HTTP API using that same order ID:
-
-```powershell
-$HttpApiInvokeUrl = "https://<api-id>.execute-api.us-west-1.amazonaws.com"
-$OrderId = "TEST-001"
-$Body = @{ item = @{ order_id = $OrderId; eventtype = "make_pizza" } } |
-  ConvertTo-Json -Compress
-
-Invoke-RestMethod -Method Post `
-  -Uri $HttpApiInvokeUrl `
-  -ContentType "application/json" `
-  -Body $Body
-```
-
-You should see status messages arrive in the `wscat` window for `make_pizza`, `cook_pizza`, `deliver_pizza`, and `delivered`, roughly three seconds apart. Receiving all four is good evidence that the backend path is working. A successful HTTP response alone only confirms that the API accepted the request.
-
-If the request succeeds but the WebSocket gets no messages, check the CloudWatch logs for `make_pizza`, `cook_pizza`, `deliver_pizza`, and `receive_events`. The test exercises the backend, but it won’t verify that nginx serves the site or that the browser UI renders correctly.
-
-### Step 2: Upload the customized website
+### Step 2: Upload the website
 
 ```powershell
 Compress-Archive -Path ".\website\*" -DestinationPath ".\website-deploy.zip" -Force
@@ -329,8 +259,8 @@ aws cloudformation deploy `
   --capabilities CAPABILITY_NAMED_IAM `
   --parameter-overrides `
     InstanceType=t3.micro `
-    HttpApiInvokeUrl=https://l9tjo46mpe.execute-api.us-west-1.amazonaws.com `
-    WebSocketApiUrl=wss://t2900jp6dl.execute-api.us-west-1.amazonaws.com/production `
+    HttpApiInvokeUrl=$HttpApiInvokeUrl `
+    WebSocketApiUrl=$WebSocketApiUrl `
     WebsiteArtifactBucket=$Bucket `
     WebsiteArtifactKey=pizza-tracking/website-deploy.zip
 ```
@@ -346,6 +276,8 @@ aws cloudformation describe-stacks `
 
 Open `http://<WebServerIP>/` after UserData completes.
 
+### Troubleshooting:
+
 aws ssm start-session `
   --target i-003f7dce812c4b878 `
   --region us-west-1
@@ -355,9 +287,6 @@ cat /var/log/pizza-tracking-user-data.log
 ls -la /usr/share/nginx/html/
 
 systemctl status nginx
-
-
-
 
 ## Outputs
 
