@@ -4,7 +4,7 @@ This project provisions a small AWS lab environment for hosting a pizza-tracking
 
 The application foundation stack creates the EventBridge bus, Lambda functions, EventBridge rules, HTTP API, WebSocket API, IAM roles, and DynamoDB connection table. The separate webserver stack creates the public EC2/nginx host and installs the customized Fireline Pizza frontend.
 
-> The application template creates the application services from the Lambda deployment ZIP. The webserver template remains separate and consumes the API URL outputs.
+> Please refer to my post here for more info: [Serverless Pizza](https://www.tech-learning-hub.com/project/serverless-pizza/)
 
 ## Architecture
 
