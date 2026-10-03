@@ -1,6 +1,6 @@
 # Pizza Tracking
 
-This project provisions a small AWS lab environment for hosting a pizza-tracking web application. The infrastructure is defined in [pizza-tracking-template.yml](pizza-tracking-template.yml), and the deployable Angular application is in [website/website](website/website).
+This project provisions a small AWS lab environment for hosting a pizza-tracking web application. The infrastructure is defined in [pizza-tracking-template.yml](pizza-tracking-template.yml), and the deployable Angular application is in [website/](website/).
 
 The application foundation stack creates the EventBridge bus, Lambda functions, EventBridge rules, HTTP API, WebSocket API, IAM roles, and DynamoDB connection table. The separate webserver stack creates the public EC2/nginx host and installs the customized Fireline Pizza frontend.
 
@@ -9,60 +9,35 @@ The application foundation stack creates the EventBridge bus, Lambda functions, 
 ## Architecture
 
 ```mermaid
-flowchart TB
-    User[Browser]
+flowchart LR
+  Browser[Browser]
+  Site[EC2 + nginx\nStatic website]
+  HttpAPI[HTTP API]
+  Bus((EventBridge))
+  Make[make_pizza Lambda]
+  Cook[cook_pizza Lambda]
+  Deliver[deliver_pizza Lambda]
+  Receive[receive_events Lambda]
+  WsAPI[WebSocket API]
+  Connect[websocket_connect Lambda]
+  Connections[(DynamoDB\norder-to-connection map)]
 
-    subgraph AWS[AWS account and selected Region]
-        subgraph VPC[webserver-template.yml]
-            IGW[Internet Gateway]
-            RT[Public route table\n0.0.0.0/0 -> IGW]
-            Subnet[PublicSubnet1\n10.10.1.0/24\npublic IP assignment]
-            SG[WebserverSecurityGroup\nHTTP ingress on TCP 80]
-            EC2[EC2\nAmazon Linux 2023\nnginx on TCP 80]
-            Subnet --> RT
-            RT --> IGW
-            EC2 --> SG
-            EC2 --> Subnet
-        end
-
-        SSM[SSMInstanceRole\ninstance profile\nSSM, EC2 read-only, S3 read-only]
-        Dynamo[(DynamoDB\nwebsocket_connections\norder_id hash key)]
-
-        EventsRole[EventBridgeRole\nfrom application stack]
-        APIRole[APIGatewayRole]
-        MakeRole[LambdaRoleMakePizza]
-        CookRole[LambdaRoleCookPizza]
-        DeliverRole[LambdaRoleDeliverPizza]
-        ConnectRole[LambdaRoleWebSocketConnection]
-        ReceiveRole[LambdaRoleReceiveEvents]
-
-        EC2 -. instance profile .-> SSM
-        ConnectRole --> Dynamo
-        ReceiveRole --> Dynamo
-    end
-
-    User -->|HTTP GET :80| IGW
-    User -->|loads Angular SPA| EC2
-
-    User -. configured at runtime .-> API[API Gateway HTTP API\nlab_http_api]
-    User -. configured at runtime .-> WS[API Gateway WebSocket API\nlab_websocket_api]
-    API -->|PutEvents| Bus[EventBridge event bus\nlab_event_bus]
-    Bus --> MakeRule[lab_make_pizza_rule]
-    Bus --> CookRule[lab_cook_pizza_rule]
-    Bus --> DeliverRule[lab_deliver_pizza_rule]
-    Bus --> ReceiveRule[lab_receive_events_rule]
-    MakeRule --> Make[Lambda make pizza]
-    CookRule --> Cook[Lambda cook pizza]
-    DeliverRule --> Deliver[Lambda deliver pizza]
-    ReceiveRule --> Receive[Lambda receive events]
-    WS --> Connect[Lambda WebSocket connection]
-    Make -. role .-> MakeRole
-    Cook -. role .-> CookRole
-    Deliver -. role .-> DeliverRole
-    Connect -. role .-> ConnectRole
-    Receive -. role .-> ReceiveRole
-    API -. role .-> APIRole
-    Bus -. role .-> EventsRole
+  Browser -->|loads site| Site
+  Browser -->|submits order| HttpAPI
+  HttpAPI -->|publishes make_pizza| Bus
+  Bus -->|make_pizza| Make
+  Make -->|cook_pizza| Bus
+  Bus -->|cook_pizza| Cook
+  Cook -->|deliver_pizza| Bus
+  Bus -->|deliver_pizza| Deliver
+  Deliver -->|delivered| Bus
+  Bus -->|status events| Receive
+  Receive -->|looks up connection| Connections
+  Receive -->|pushes status| WsAPI
+  WsAPI -->|status update| Browser
+  Browser -->|connects with order_id| WsAPI
+  WsAPI --> Connect
+  Connect -->|stores connection| Connections
 ```
 
 ### Stack ownership
